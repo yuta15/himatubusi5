@@ -36,6 +36,9 @@ class Engine:
     async def get_result(self, job_id: str) -> object:
         return self._get_job(job_id).get_result()
 
+    async def cancel(self, job_id: str) -> bool:
+        return self._runner.cancel(self._get_job(job_id))
+
     def _get_job(self, job_id: str) -> Job:
         try:
             return self._jobs[job_id]
