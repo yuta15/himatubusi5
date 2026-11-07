@@ -1,3 +1,4 @@
+from engine import Engine
 from interface import JobEngine
 
 
@@ -9,4 +10,4 @@ def create_engine() -> JobEngine:
 
     呼び出しごとに独立したエンジンを生成すること。
     """
-    raise NotImplementedError
+    return Engine()
