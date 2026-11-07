@@ -4,7 +4,7 @@ import asyncio
 from dataclasses import dataclass, field
 from typing import Awaitable, Callable
 
-from interface import JobExecutionError, JobNotFinishedError, JobStatus
+from interface import JobCancelledError, JobExecutionError, JobNotFinishedError, JobStatus
 
 
 @dataclass(frozen=True)
@@ -48,6 +48,13 @@ class Job:
         self._status = JobStatus.FAILED
         self._completed.set()
 
+    def cancelled(self) -> None:
+        """処理が未開始、またはCancelledErrorで終了した場合に確定する。"""
+        if self._status not in (JobStatus.PENDING, JobStatus.RUNNING):
+            return
+        self._status = JobStatus.CANCELLED
+        self._completed.set()
+
     async def wait(self) -> None:
         await self._completed.wait()
 
@@ -56,6 +63,8 @@ class Job:
         if self._status is JobStatus.FAILED:
             assert self.cause is not None
             raise JobExecutionError(self.cause) from self.cause
+        if self._status is JobStatus.CANCELLED:
+            raise JobCancelledError(self.job_id)
         if self._status is not JobStatus.SUCCEEDED:
             raise JobNotFinishedError(self.job_id)
         return self.result

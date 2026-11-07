@@ -47,8 +47,15 @@ class Engine:
     async def get_result(self, job_id: str) -> object:
         return self._get_job(job_id).get_result()
 
+    async def cancel(self, job_id: str) -> bool:
+        registration = self._get_registration(job_id)
+        return registration.runner.cancel(registration.job)
+
     def _get_job(self, job_id: str) -> Job:
+        return self._get_registration(job_id).job
+
+    def _get_registration(self, job_id: str) -> _Registration:
         try:
-            return self._jobs[job_id].job
+            return self._jobs[job_id]
         except KeyError:
             raise JobNotFoundError(job_id) from None
