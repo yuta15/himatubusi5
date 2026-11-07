@@ -1,3 +1,4 @@
+
 from enum import Enum
 from typing import Awaitable, Callable, Protocol
 
@@ -7,6 +8,7 @@ class JobStatus(str, Enum):
     RUNNING = "RUNNING"
     SUCCEEDED = "SUCCEEDED"
     FAILED = "FAILED"
+    CANCELLED = "CANCELLED"
 
 
 class JobError(Exception):
@@ -29,6 +31,10 @@ class JobExecutionError(JobError):
         super().__init__(str(cause))
 
 
+class JobCancelledError(JobError):
+    """ジョブがキャンセルされた。"""
+
+
 class JobEngine(Protocol):
     async def submit(
         self,
@@ -49,4 +55,17 @@ class JobEngine(Protocol):
 
     async def get_result(self, job_id: str) -> object:
         """正常終了したジョブの戻り値を取得する。"""
+        ...
+
+    async def cancel(self, job_id: str) -> bool:
+        """
+        ジョブのキャンセルを要求する。
+
+        Returns:
+            True: キャンセル要求を新たに受け付けた。
+            False: 既に要求済み、またはジョブが終端状態にある。
+
+        Raises:
+            JobNotFoundError: 指定されたジョブIDが存在しない。
+        """
         ...
