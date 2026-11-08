@@ -9,9 +9,14 @@ from job_runner import JobRunner
 
 
 class Engine:
-    def __init__(self) -> None:
+    def __init__(self, max_concurrency: int | None = None) -> None:
+        if max_concurrency is not None:
+            if isinstance(max_concurrency, bool) or not isinstance(max_concurrency, int):
+                raise TypeError("max_concurrency must be a positive integer or None")
+            if max_concurrency <= 0:
+                raise ValueError("max_concurrency must be positive")
         self._jobs: dict[str, Job] = {}
-        self._runner = JobRunner()
+        self._runner = JobRunner(max_concurrency)
 
     async def submit(
         self,

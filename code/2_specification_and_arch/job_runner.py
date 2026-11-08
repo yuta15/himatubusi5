@@ -7,7 +7,10 @@ from job import Job
 
 
 class JobRunner:
-    def __init__(self) -> None:
+    def __init__(self, max_concurrency: int | None = None) -> None:
+        self._slots = (
+            asyncio.Semaphore(max_concurrency) if max_concurrency is not None else None
+        )
         # 実行中タスクがガベージコレクションされないよう強参照を保持する。
         self._tasks: dict[Job, asyncio.Task[None]] = {}
 
@@ -37,6 +40,24 @@ class JobRunner:
         del self._tasks[job]
 
     async def _run(
+        self,
+        job: Job,
+        func: Callable[..., Awaitable[object]],
+        args: tuple[object, ...],
+        kwargs: dict[str, object],
+    ) -> None:
+        try:
+            if self._slots is None:
+                await self._execute(job, func, args, kwargs)
+            else:
+                # 枠を待つ間は PENDING。実際の終了まで枠を保持する。
+                async with self._slots:
+                    await self._execute(job, func, args, kwargs)
+        except asyncio.CancelledError:
+            # 実行枠の取得待ちでキャンセルされた場合も完了を通知する。
+            job.finish_cancelled()
+
+    async def _execute(
         self,
         job: Job,
         func: Callable[..., Awaitable[object]],
