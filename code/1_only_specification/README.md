@@ -1,7 +1,8 @@
 # 非同期ジョブ実行エンジン
 
 現在の実装は、以下の v1.0 仕様、[`cancel.md`](cancel.md) の v1.1 追加仕様、
-[`run_count.md`](run_count.md) の v1.2 最大同時実行数制限に対応する。
+[`run_count.md`](run_count.md) の v1.2 最大同時実行数制限、
+[`v2.md`](v2.md) の v2.0 追加仕様に対応する。
 v1.1 ではキャンセルを対象範囲に追加し、ジョブが `asyncio.CancelledError` で終了した場合の状態を `CANCELLED` とする。
 
 `create_engine(max_concurrency=2)` で同時に実行するジョブを最大2件に制限できる。
@@ -27,13 +28,45 @@ status = await engine.get_status(job_id)
 内部ではジョブごとに実行用 `Task`、キャンセル要求の受付フラグ、完了通知用 `Event` を保持する。
 要求受付は待機を挟まずに行い、同じ `Task` への重複通知を防ぐ。
 実行開始前のキャンセルでは、受付側で状態と完了通知を確定する。
-実行数を制限する場合は `Semaphore` の枠を取得してから処理本体を開始する。
+実行可能なジョブを優先度付きキューで管理し、実行枠が空くと自動的に開始する。
 実行中の場合は実行ラッパーが実際の終了結果を記録してから通知する。
 各利用者は `Event` を独立して待機するため、待機者自身のキャンセルはジョブや他の待機者に伝播しない。
 
-テスト: `python -m unittest -v`
+`submit_job()` ではリトライ、指数バックオフ、各試行のタイムアウト、依存関係、
+優先度を指定できる。既存の `submit()` は従来どおり使用できる。
 
-以下は v1.0 時点の仕様書であり、キャンセルに関する変更は v1.1 追加仕様を優先する。
+```python
+from interface import JobSpec, RetryPolicy
+from main import create_engine
+
+async def fetch():
+    return "data"
+
+async def process():
+    return "processed"
+
+engine = create_engine(max_concurrency=2)
+first = await engine.submit_job(JobSpec(
+    fetch,
+    retry=RetryPolicy(max_retries=3, initial_delay=0.1, multiplier=2, max_delay=1),
+    timeout=5,
+    priority=10,
+))
+second = await engine.submit_job(JobSpec(process, depends_on=(first,)))
+await engine.wait(second)
+result = await engine.get_result(second)
+```
+
+依存関係・バックオフ待機中は `PENDING` となり、実行枠を消費しない。
+タイムアウトでは処理に協調的な中断を要求し、後処理を含めて実際に終了するまで
+`RUNNING` と実行枠を維持する。依存先が失敗・キャンセルされたジョブは
+`FAILED` となり、`JobExecutionError.cause` に `JobDependencyError` を保持する。
+タイムアウトの中断通知済みの試行に対する `cancel()` は `False` を返す。
+その後リトライ待機中または次の試行であれば、改めてキャンセルを要求できる。
+
+テスト: `.venv/bin/python -m unittest -v`（Python 3.14 環境）
+
+以下は v1.0 時点の仕様書であり、変更点については v1.1〜v2.0 の追加仕様を優先する。
 
 # 非同期ジョブ実行エンジン 仕様書 v1.0
 
