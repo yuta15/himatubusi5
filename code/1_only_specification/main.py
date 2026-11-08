@@ -10,4 +10,4 @@ def create_engine(max_concurrency: int | None = None) -> JobEngine:
 
     呼び出しごとに独立したエンジンを生成すること。
     """
-    return AsyncJobEngine()
+    return AsyncJobEngine(max_concurrency=max_concurrency)

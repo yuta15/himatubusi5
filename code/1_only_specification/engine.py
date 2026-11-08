@@ -25,8 +25,16 @@ class _Job:
 
 
 class AsyncJobEngine:
-    def __init__(self) -> None:
+    def __init__(self, max_concurrency: int | None = None) -> None:
+        if max_concurrency is not None:
+            if isinstance(max_concurrency, bool) or not isinstance(max_concurrency, int):
+                raise TypeError("max_concurrency must be a positive integer or None")
+            if max_concurrency <= 0:
+                raise ValueError("max_concurrency must be positive")
         self._jobs: dict[str, _Job] = {}
+        self._slots = (
+            asyncio.Semaphore(max_concurrency) if max_concurrency is not None else None
+        )
 
     async def submit(
         self,
@@ -63,8 +71,8 @@ class AsyncJobEngine:
         assert job.task is not None
         job.task.cancel()
         if job.status == JobStatus.PENDING:
-            # A task cancelled before its first step never enters _run(),
-            # including its finally block. Publish completion here instead.
+            # A task cancelled before its first step never enters _run().
+            # Pending jobs never invoke the callable or own an execution slot.
             job.status = JobStatus.CANCELLED
             job.finished.set()
         return True
@@ -97,8 +105,13 @@ class AsyncJobEngine:
         args: tuple[object, ...],
         kwargs: dict[str, object],
     ) -> None:
-        job.status = JobStatus.RUNNING
+        acquired = False
         try:
+            if self._slots is not None:
+                await self._slots.acquire()
+                acquired = True
+            # No suspension between acquiring a slot and starting the callable.
+            job.status = JobStatus.RUNNING
             job.result = await func(*args, **kwargs)
         except asyncio.CancelledError:
             job.status = JobStatus.CANCELLED
@@ -110,4 +123,9 @@ class AsyncJobEngine:
         else:
             job.status = JobStatus.SUCCEEDED
         finally:
+            # Cancellation cleanup (including suppressed cancellation) runs
+            # inside the callable and must finish before releasing its slot.
+            if acquired:
+                assert self._slots is not None
+                self._slots.release()
             job.finished.set()
