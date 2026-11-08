@@ -138,3 +138,14 @@ async def jobs():
         yield scope
     finally:
         await scope.finish()
+
+
+@pytest.fixture
+async def v2_jobs():
+    from v2_support import V2Scope
+
+    scope = V2Scope()
+    try:
+        yield scope
+    finally:
+        await scope.finish()
