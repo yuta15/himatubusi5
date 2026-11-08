@@ -2,6 +2,7 @@ import asyncio
 import unittest
 
 from interface import (
+    JobCancelledError,
     JobExecutionError,
     JobNotFinishedError,
     JobNotFoundError,
@@ -133,17 +134,17 @@ class JobEngineTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIsInstance(error.exception.cause, expected)
 
     async def test_base_exceptions_finish_job(self):
-        for cause in (asyncio.CancelledError("cancelled"), BaseException("failed")):
-            with self.subTest(cause=cause):
-                async def fail():
-                    raise cause
+        cause = BaseException("failed")
 
-                job_id = await self.engine.submit(fail)
-                await self.finish(job_id)
-                self.assertEqual(await self.engine.get_status(job_id), JobStatus.FAILED)
-                with self.assertRaises(JobExecutionError) as error:
-                    await self.engine.get_result(job_id)
-                self.assertIs(error.exception.cause, cause)
+        async def fail():
+            raise cause
+
+        job_id = await self.engine.submit(fail)
+        await self.finish(job_id)
+        self.assertEqual(await self.engine.get_status(job_id), JobStatus.FAILED)
+        with self.assertRaises(JobExecutionError) as error:
+            await self.engine.get_result(job_id)
+        self.assertIs(error.exception.cause, cause)
 
     async def test_missing_ids_and_independent_engines(self):
         other = create_engine()
@@ -155,7 +156,7 @@ class JobEngineTests(unittest.IsolatedAsyncioTestCase):
         job_id = await self.engine.submit(job)
         await self.finish(job_id)
         for engine, missing in ((self.engine, "missing"), (other, job_id)):
-            for method in (engine.get_status, engine.get_result, engine.wait):
+            for method in (engine.get_status, engine.get_result, engine.wait, engine.cancel):
                 with self.subTest(method=method, missing=missing):
                     with self.assertRaises(JobNotFoundError):
                         await method(missing)
@@ -190,6 +191,197 @@ class JobEngineTests(unittest.IsolatedAsyncioTestCase):
         release.set()
         self.assertEqual(await asyncio.gather(*waiters), [None, None, None])
         self.assertEqual(await self.engine.get_result(job_id), "done")
+
+    async def test_pending_cancellation_never_invokes_callable(self):
+        invoked = False
+
+        def job():
+            nonlocal invoked
+            invoked = True
+            raise AssertionError("cancelled pending job was invoked")
+
+        job_id = await self.engine.submit(job)
+        self.assertEqual(await self.engine.get_status(job_id), JobStatus.PENDING)
+        self.assertTrue(await self.engine.cancel(job_id))
+        self.assertFalse(await self.engine.cancel(job_id))
+        for _ in range(2):
+            self.assertIsNone(await self.finish(job_id))
+            self.assertEqual(await self.engine.get_status(job_id), JobStatus.CANCELLED)
+            with self.assertRaises(JobCancelledError):
+                await self.engine.get_result(job_id)
+        self.assertFalse(invoked)
+
+    async def test_running_cancellation_waits_for_cleanup_and_notifies_once(self):
+        started = asyncio.Event()
+        cleaning = asyncio.Event()
+        release = asyncio.Event()
+        notifications = 0
+
+        async def job():
+            nonlocal notifications
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                notifications += 1
+                cleaning.set()
+                await release.wait()
+                raise
+
+        job_id = await self.engine.submit(job)
+        await asyncio.wait_for(started.wait(), timeout=2)
+        waiters = [asyncio.create_task(self.engine.wait(job_id)) for _ in range(3)]
+        # wait_for also verifies cancel returns without waiting for cleanup.
+        self.assertTrue(await asyncio.wait_for(self.engine.cancel(job_id), timeout=2))
+        await asyncio.wait_for(cleaning.wait(), timeout=2)
+        self.assertEqual(await self.engine.get_status(job_id), JobStatus.RUNNING)
+        with self.assertRaises(JobNotFinishedError):
+            await self.engine.get_result(job_id)
+        self.assertEqual(
+            await asyncio.gather(*(self.engine.cancel(job_id) for _ in range(5))),
+            [False] * 5,
+        )
+        waiters[0].cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await waiters[0]
+        self.assertTrue(all(not waiter.done() for waiter in waiters[1:]))
+        release.set()
+        self.assertEqual(await asyncio.wait_for(asyncio.gather(*waiters[1:]), 2), [None, None])
+        self.assertEqual(notifications, 1)
+        self.assertEqual(await self.engine.get_status(job_id), JobStatus.CANCELLED)
+        with self.assertRaises(JobCancelledError):
+            await self.engine.get_result(job_id)
+        self.assertFalse(await self.engine.cancel(job_id))
+
+    async def test_cancellation_handler_outcome_determines_terminal_state(self):
+        for outcome in ("success", "failure"):
+            with self.subTest(outcome=outcome):
+                started = asyncio.Event()
+                cause = ValueError("cleanup failed")
+
+                async def job():
+                    started.set()
+                    try:
+                        await asyncio.Event().wait()
+                    except asyncio.CancelledError:
+                        if outcome == "failure":
+                            raise cause
+                        return "recovered"
+
+                job_id = await self.engine.submit(job)
+                await asyncio.wait_for(started.wait(), 2)
+                self.assertTrue(await self.engine.cancel(job_id))
+                await self.finish(job_id)
+                if outcome == "success":
+                    self.assertEqual(await self.engine.get_status(job_id), JobStatus.SUCCEEDED)
+                    self.assertEqual(await self.engine.get_result(job_id), "recovered")
+                else:
+                    self.assertEqual(await self.engine.get_status(job_id), JobStatus.FAILED)
+                    with self.assertRaises(JobExecutionError) as error:
+                        await self.engine.get_result(job_id)
+                    self.assertIs(error.exception.cause, cause)
+                self.assertFalse(await self.engine.cancel(job_id))
+
+    async def test_cancelled_error_without_request(self):
+        for outcome in ("cancelled", "success", "failure"):
+            with self.subTest(outcome=outcome):
+                cause = RuntimeError("replacement")
+
+                async def job():
+                    try:
+                        raise asyncio.CancelledError("from job")
+                    except asyncio.CancelledError:
+                        if outcome == "success":
+                            return 42
+                        if outcome == "failure":
+                            raise cause
+                        raise
+
+                job_id = await self.engine.submit(job)
+                await self.finish(job_id)
+                expected = {
+                    "cancelled": JobStatus.CANCELLED,
+                    "success": JobStatus.SUCCEEDED,
+                    "failure": JobStatus.FAILED,
+                }[outcome]
+                self.assertEqual(await self.engine.get_status(job_id), expected)
+                if outcome == "cancelled":
+                    with self.assertRaises(JobCancelledError):
+                        await self.engine.get_result(job_id)
+                elif outcome == "success":
+                    self.assertEqual(await self.engine.get_result(job_id), 42)
+                else:
+                    with self.assertRaises(JobExecutionError) as error:
+                        await self.engine.get_result(job_id)
+                    self.assertIs(error.exception.cause, cause)
+                self.assertFalse(await self.engine.cancel(job_id))
+
+    async def test_multiple_jobs_cancel_independently(self):
+        started = [asyncio.Event() for _ in range(3)]
+        release = asyncio.Event()
+
+        async def job(index):
+            started[index].set()
+            await release.wait()
+            return index
+
+        ids = [await self.engine.submit(job, i) for i in range(3)]
+        await asyncio.wait_for(asyncio.gather(*(event.wait() for event in started)), 2)
+        results = await asyncio.gather(
+            self.engine.cancel(ids[0]), self.engine.cancel(ids[1]),
+            self.engine.cancel(ids[0]), self.engine.cancel(ids[1]),
+        )
+        self.assertEqual(results, [True, True, False, False])
+        await asyncio.gather(*(self.finish(job_id) for job_id in ids[:2]))
+        self.assertEqual(await self.engine.get_status(ids[2]), JobStatus.RUNNING)
+        release.set()
+        await self.finish(ids[2])
+        self.assertEqual(await self.engine.get_result(ids[2]), 2)
+        for job_id in ids[:2]:
+            self.assertEqual(await self.engine.get_status(job_id), JobStatus.CANCELLED)
+            with self.assertRaises(JobCancelledError):
+                await self.engine.get_result(job_id)
+
+    async def test_completion_and_cancellation_race_preserves_outcome(self):
+        for fails in (False, True):
+            for cancel_first in (False, True):
+                with self.subTest(fails=fails, cancel_first=cancel_first):
+                    started = asyncio.Event()
+                    release = asyncio.Event()
+                    cause = ValueError("failed")
+
+                    async def job():
+                        started.set()
+                        await release.wait()
+                        if fails:
+                            raise cause
+                        return 42
+
+                    job_id = await self.engine.submit(job)
+                    await asyncio.wait_for(started.wait(), 2)
+                    if cancel_first:
+                        self.assertTrue(await self.engine.cancel(job_id))
+                        release.set()
+                    else:
+                        release.set()
+                        # Queue cancel after the job's continuation, before
+                        # awaiting either, to exercise the completion race.
+                        self.assertFalse(await asyncio.create_task(self.engine.cancel(job_id)))
+                    await self.finish(job_id)
+                    expected = (JobStatus.CANCELLED if cancel_first else
+                                JobStatus.FAILED if fails else JobStatus.SUCCEEDED)
+                    for _ in range(2):
+                        self.assertEqual(await self.engine.get_status(job_id), expected)
+                        self.assertFalse(await self.engine.cancel(job_id))
+                        if cancel_first:
+                            with self.assertRaises(JobCancelledError):
+                                await self.engine.get_result(job_id)
+                        elif fails:
+                            with self.assertRaises(JobExecutionError) as error:
+                                await self.engine.get_result(job_id)
+                            self.assertIs(error.exception.cause, cause)
+                        else:
+                            self.assertEqual(await self.engine.get_result(job_id), 42)
 
 
 if __name__ == "__main__":

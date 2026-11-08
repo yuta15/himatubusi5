@@ -1,3 +1,31 @@
+# 非同期ジョブ実行エンジン
+
+現在の実装は、以下の v1.0 仕様と [`cancel.md`](cancel.md) の v1.1 追加仕様に対応する。
+v1.1 ではキャンセルを対象範囲に追加し、ジョブが `asyncio.CancelledError` で終了した場合の状態を `CANCELLED` とする。
+
+```python
+engine = create_engine()  # from main import create_engine
+job_id = await engine.submit(async_job)
+accepted = await engine.cancel(job_id)
+await engine.wait(job_id)
+status = await engine.get_status(job_id)
+```
+
+`cancel()` は要求を初めて受け付けると `True`、要求済み・終了済みの場合は `False` を返す。
+実行中の処理には協調的にキャンセルを通知するため、受付時点で完了するとは限らない。
+`wait()` で実際の終了を待機し、`get_status()` で終了状態を確認できる。
+`CANCELLED` の結果取得は `JobCancelledError` となる。キャンセルを捕捉して正常終了・異常終了した処理は、それぞれ `SUCCEEDED`・`FAILED` となる。
+
+内部ではジョブごとに実行用 `Task`、キャンセル要求の受付フラグ、完了通知用 `Event` を保持する。
+要求受付は待機を挟まずに行い、同じ `Task` への重複通知を防ぐ。
+開始前にキャンセルした場合は実行ラッパーも開始されないため、受付側で状態と完了通知を確定する。
+実行中の場合は実行ラッパーが実際の終了結果を記録してから通知する。
+各利用者は `Event` を独立して待機するため、待機者自身のキャンセルはジョブや他の待機者に伝播しない。
+
+テスト: `python -m unittest -v`
+
+以下は v1.0 時点の仕様書であり、キャンセルに関する変更は v1.1 追加仕様を優先する。
+
 # 非同期ジョブ実行エンジン 仕様書 v1.0
 
 ## 1. 概要
