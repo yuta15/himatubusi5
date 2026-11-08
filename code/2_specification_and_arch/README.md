@@ -1,34 +1,57 @@
 # 非同期ジョブ実行エンジン 仕様書 v1.0
 
-現在の実装は、以下の v1.0 仕様に [v1.1 ジョブキャンセル仕様](cancel.md) と
-[v1.2 最大同時実行数制限仕様](run_count.md) を追加したもの。
-キャンセルに関する公開契約・対象範囲は v1.1 の定義を適用する。
+現在の実装は、以下の v1.0 仕様に [v1.1 ジョブキャンセル仕様](cancel.md)、
+[v1.2 最大同時実行数制限仕様](run_count.md)、[v2.0 追加仕様](v2.md) を追加したもの。
+以下の v1.0 の対象範囲や状態遷移は、各追加仕様で拡張される。
 
-## v1.2 の実行数制限
+## v2.0 の利用方法
 
-`create_engine(max_concurrency=3)` のように正の整数を指定すると、エンジンごとの最大同時実行数を制限する。
-省略時および `None` は制限なし。`bool` と整数以外は `TypeError`、0 以下は `ValueError` で拒否する。
+既存の `submit()` は引き続き使用できる。実行設定を指定する場合は `submit_job()` を使う。
 
-`JobRunner` がエンジンごとの `asyncio.Semaphore` を保持し、実行枠を確保してからジョブを `RUNNING` にする。
-枠の取得待ちは `PENDING` を維持し、`submit()` は枠を待たずにジョブ ID を返す。
-処理が成功・失敗・キャンセルで終了すると枠を解放し、待機中ジョブを自動的に進める。
-キャンセル後の後処理やキャンセルを抑制した処理が続く間は枠を保持する。
-実行枠の取得待ちでキャンセルされたジョブは処理本体を呼ばず、`CANCELLED` に遷移する。
+```python
+from interface import JobSpec, RetryPolicy
+from main import create_engine
 
-## v1.1 の実装構成
 
-既存の `Engine` → `Job` / `JobRunner` の構成を維持する。
+async def example():
+    engine = create_engine(max_concurrency=3)
 
-- `Engine` はジョブ ID の検索と公開 API を担当し、`cancel()` を `JobRunner` に委譲する。
-- `Job` は状態・結果・完了通知に加え、キャンセル要求の受付済みフラグを保持する。終端状態または受付済みの場合は再要求を拒否する。
-- `JobRunner` は実行中のジョブとタスクの対応を保持し、受付時に一度だけ `Task.cancel()` を通知する。実行中の処理が終了した結果に従って成功・失敗・キャンセルを確定する。
-- 実行開始前のタスクがキャンセルされた場合は、タスクの完了コールバックで `PENDING` から `CANCELLED` に遷移させる。処理本体は呼び出さない。
-- `wait()` は従来どおりジョブの完了イベントを待機する。待機者自身のキャンセルはジョブや他の待機者へ伝播しない。
+    async def fetch():
+        return "data"
 
-キャンセルの受付判定とタスクへの通知は、途中で `await` せずに行う。
-キャンセル受付後の終了処理中は `RUNNING` を維持し、`get_result()` は `JobNotFinishedError` を送出する。
-`CancelledError` で終了した場合のみ `CANCELLED` とし、結果取得時は `JobCancelledError` を送出する。
-ジョブがキャンセルを捕捉して正常終了・別の例外で終了した場合は、それぞれ `SUCCEEDED`・`FAILED` とする。
+    async def process():
+        return "done"
+
+    first = await engine.submit_job(JobSpec(
+        fetch,
+        retry=RetryPolicy(max_retries=2, initial_delay=0.1, max_delay=1.0),
+        timeout=5.0,
+    ))
+    second = await engine.submit_job(JobSpec(
+        process, depends_on=(first,), priority=10,
+    ))
+    await engine.wait(second)
+    return await engine.get_result(second)
+```
+
+- `RetryPolicy` は追加試行回数、指数バックオフ、対象例外を指定する。最終失敗時は最後の例外を保持する。
+- `timeout` は各試行の実行時間に適用する。中断要求後も、処理が実際に終了するまで実行枠を保持する。
+- `depends_on` は同一エンジンの登録済み ID を指定する。全依存先の成功で実行可能となり、失敗・キャンセルは `JobDependencyError` として後続へ伝播する。
+- `priority` は大きい値を優先する。同順位では実行可能になった順に進む。
+- 依存待ちとバックオフ中は `PENDING` で実行枠を使用しない。直接キャンセルすると、以降の試行や本体を開始しない。
+- 登録時に設定を検証し、設定コンテナをコピーする。引数として渡すオブジェクト自体の同一性は維持する。
+
+## 実装構成
+
+`Engine` は公開 API、設定の検証とスナップショット、ジョブの登録・検索を担当する。
+`Job` は状態・最終結果・完了通知とキャンセルの受付を管理する。
+`JobRunner` は優先度キュー、エンジンごとの実行枠、試行、タイマー、依存関係の進行を管理する。
+`create_engine(max_concurrency=None)` は制限なし、正の整数は最大同時実行数を指定する。
+
+タイムアウトと明示的キャンセルは先着の中断要求だけを通知する。
+タイムアウト通知後の `cancel()` は `False` を返し、終了処理を重複して中断しない。
+処理が中断を捕捉して正常終了した場合は成功、別の例外で終了した場合はその例外を原因とする。
+`wait()` はジョブ全体の終端を待ち、待機者のキャンセルはジョブ本体へ伝播しない。
 
 検証コマンド（Python 3.14 以降）: `python3.14 -m unittest discover -v`
 

@@ -28,7 +28,8 @@ class Job:
         self._finished.set()
 
     def fail(self, cause: BaseException) -> None:
-        self._require_status(JobStatus.RUNNING)
+        if self._status not in (JobStatus.PENDING, JobStatus.RUNNING):
+            raise RuntimeError(f"Cannot fail a {self._status.value} job")
         self._cause = cause
         self._status = JobStatus.FAILED
         self._finished.set()
@@ -38,6 +39,10 @@ class Job:
             return False
         self._cancel_requested = True
         return True
+
+    def retry(self) -> None:
+        self._require_status(JobStatus.RUNNING)
+        self._status = JobStatus.PENDING
 
     def finish_cancelled(self) -> None:
         if self._status not in (JobStatus.PENDING, JobStatus.RUNNING):
