@@ -1,6 +1,7 @@
 # 共通契約テスト
 
-`specification/README.md` v1.0と `specification/cancel.md` v1.1を、選択した実装の公開APIから検証する。
+`specification/README.md` v1.0、`specification/cancel.md` v1.1、
+`specification/run_count.md` v1.2を、選択した実装の公開APIから検証する。
 `main.create_engine()` と、その実装の `interface.py` だけを利用する。
 内部のクラス、保存領域、タスク、スケジューリング方式は検査しない。
 
@@ -107,6 +108,43 @@ uv run --group test python -m pytest test/test_cancel_contract.py --engine=3
 キャンセル機能や追加定義が未実装の場合は失敗として記録する。
 C02の観測不能によるskipとは区別する。
 
+## v1.2の最大同時実行数制限テストケース一覧
+
+`test_run_count_contract.py` にR01〜R18の追加検証を実装する。
+パラメーター化後は50ケースで、既存73ケースと合わせて計123ケース。
+既存の `test_contract.py` と `test_cancel_contract.py` は変更せず、引数省略のエンジンで回帰実行する。
+既存のC01でJobEngine・状態・例外の公開契約を、R01でエンジン生成APIを確認する。
+
+| 計画 | 関数名の `test_` 以降 | ケース数 | 検証内容 |
+| --- | --- | ---: | --- |
+| R01 | `create_engine_success_concurrency_contract` | 5 | 生成シグネチャ、引数省略・None・正の整数1/2/3 |
+| R02 | `create_engine_failure_invalid_concurrency` | 12 | 0・負数・bool・整数相当のfloatを含む非整数値を生成時に拒否 |
+| R03 | `submit_success_unlimited_concurrency` | 2 | 省略・Noneで全本体が終了許可前に開始できる |
+| R04 | `submit_success_full_capacity_registers_pending` | 3 | 上限1/2/3を占有中も登録が復帰、一意ID・PENDING・本体未実行 |
+| R05 | `submit_success_capacity_and_eventual_completion` | 6 | 上限1/2/3、逐次・同時登録、開始通知に従うEvent解放で全件終端・各1回 |
+| R06 | `wait_success_terminal_releases_capacity` | 3 | 成功・失敗・自発的キャンセル後の自動進行と枠解放 |
+| R07 | `wait_success_pending_lifecycle` | 1 | PENDINGの照会・未確定結果・待機とRUNNING・終端への遷移 |
+| R08/R09 | `cancel_success_pending_capacity_isolation` | 2 | PENDINGキャンセル、重複要求、本体未実行・後続実行・過剰解放防止 |
+| R10/R11 | `cancel_success_cleanup_holds_capacity` | 3 | finally内の終了処理、キャンセル抑制後の成功・失敗まで実行枠を保持 |
+| R12 | `cancel_success_duplicate_does_not_overrelease` | 2 | 終了処理到達後の逐次・同時重複要求、再通知・過剰解放の防止 |
+| R13 | `cancel_success_pending_start_race` | 4 | 開始との競合、自然成功・失敗、受付結果・本体実行記録・終端状態の整合 |
+| R14 | `wait_success_simultaneous_capacity_release` | 1 | 同じEventで2枠を解放、待機本体の自動進行・上限・各1回 |
+| R15 | `wait_success_pending_waiter_isolation` | 1 | PENDINGの待機者だけを取り消しても本体と他待機者が進行 |
+| R16 | `create_engine_success_independent_capacity` | 1 | 上限1と2のエンジンで実行枠・占有・解放・キャンセルの独立性 |
+| R17 | `wait_success_capacity_wait_allows_async_progress` | 1 | 枠待ち・完了待機中も別Taskが通知・本体解放できる |
+| R18 | `get_result_success_limited_terminal_data_retained` | 3 | 制限下の成功・失敗・キャンセルの状態と結果を保持し、終端後に再実行しない |
+
+追加ケースだけを実行する場合:
+
+```bash
+uv run --group test python -m pytest test/test_run_count_contract.py --engine=1
+uv run --group test python -m pytest test/test_run_count_contract.py --engine=2
+uv run --group test python -m pytest test/test_run_count_contract.py --engine=3
+```
+
+3条件とも同じテストと期待結果を使用する。無効値の例外はValueErrorまたはTypeErrorを許容する。
+上限を引数で受け付けても、実行制御や入力検証が未実装なら失敗として記録する。
+
 ## 同期と後処理
 
 - テストごとに新しいエンジンを生成する。独立性のテストでは2つ生成する。
@@ -136,6 +174,25 @@ C10はキャンセル要求先行・完了確認後の要求・同じEventから
 競合の勝者は固定せず、実際に確定した終端状態と結果の整合性、後続要求に対する不変性を確認する。
 C14ではテスト所有の待機Taskだけを取り消す。この操作による `asyncio.CancelledError` は期待結果とし、
 ジョブのキャンセル結果として `get_result()` が返すべき `JobCancelledError` と区別する。
+
+実行数制限テストは `run_count_support.py` の `RunCountScope` を使用する。
+テスト用本体の入口・退出で同時実行数と最大値、各本体の呼び出し回数を記録する。
+計測更新中にawaitせず、終了処理中も退出まで実行数に含める。
+エンジンの内部Taskや実行枠を数えたり操作したりしない。
+開始通知のQueueは、実際に開始した本体をテスト側が解放するためにだけ使用し、
+エンジンのFIFO・LIFOなどの実行順序を要求しない。
+
+R10/R12では、本体が最初のCancelledErrorを捕捉し、finally内の終了処理到達Eventを通知して停止する。
+R12の重複要求はこの通知を確認した後に発行する。
+`run_jobs` fixtureのfinallyで全終了処理ゲートを開き、既存ヘルパーで本体ゲートの解放と回収を行う。
+タイムアウトや状態不整合でテストが途中失敗しても同じ後処理を実行する。
+エンジンが枠待ちを進行できず、ゲート解放後も公開waitで回収不能なら、後処理エラーを残す。
+
+R13はAの終了とBへの要求を同じEventから起動し、起動Taskの作成順も変えて検証する。
+作成順から要求受付と実行開始の先後を断定しない。
+B・Cの終了許可は先に開き、どちらが先に選ばれても他方を不当に待たせないようにする。
+Bが未開始ならTrue/CANCELLED、開始済みなら実際の終端結果との整合を検証する。
+要求が自然終了後に処理された場合のFalseも許容し、確定状態・結果の不変性を確認する。
 
 ## CSV出力
 
@@ -176,3 +233,6 @@ engine_1_<UTC日時>_<UUID>.csv
 - PENDINGの開始前キャンセルがskipとなった実装については、その受け入れ条件の検証は未完了。
   RUNNINGからのキャンセルはC03で独立して判定する。
 - キャンセル機能が未実装の間は、実エンジンでのv1.1への適合確認は完了しない。
+- v1.2では先に実行枠を埋めることでPENDINGを作る。これらのケースでPENDINGが維持されない場合は
+  skipにせず不合格とする。無制限エンジンのC02とは条件が異なる。
+- R05などの有限個のジョブで実行進行を検証する。任意の負荷や無限に続く登録に対する公平性は証明しない。

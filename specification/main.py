@@ -1,7 +1,7 @@
 from interface import JobEngine
 
 
-def create_engine() -> JobEngine:
+def create_engine(max_concurrency: int | None = None) -> JobEngine:
     """
     新しいジョブ実行エンジンを生成する。
     この関数の内部実装は自由に変更してよい。
