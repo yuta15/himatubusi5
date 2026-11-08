@@ -1,4 +1,4 @@
-
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Awaitable, Callable, Protocol
 
@@ -35,6 +35,34 @@ class JobCancelledError(JobError):
     """ジョブがキャンセルされた。"""
 
 
+class JobDependencyError(JobError):
+    """依存ジョブが正常終了しなかった。"""
+
+    def __init__(self, dependency_id: str) -> None:
+        self.dependency_id = dependency_id
+        super().__init__(f"Dependency job did not succeed: {dependency_id}")
+
+
+@dataclass(frozen=True)
+class RetryPolicy:
+    max_retries: int = 0
+    initial_delay: float = 0.0
+    multiplier: float = 2.0
+    max_delay: float | None = None
+    retry_on: tuple[type[Exception], ...] = (Exception,)
+
+
+@dataclass(frozen=True)
+class JobSpec:
+    func: Callable[..., Awaitable[object]]
+    args: tuple[object, ...] = ()
+    kwargs: dict[str, object] = field(default_factory=dict)
+    retry: RetryPolicy = field(default_factory=RetryPolicy)
+    timeout: float | None = None
+    priority: int = 0
+    depends_on: tuple[str, ...] = ()
+
+
 class JobEngine(Protocol):
     async def submit(
         self,
@@ -43,6 +71,10 @@ class JobEngine(Protocol):
         **kwargs: object,
     ) -> str:
         """ジョブを登録し、実行をスケジュールする。"""
+        ...
+
+    async def submit_job(self, spec: JobSpec) -> str:
+        """指定された設定でジョブを登録し、ジョブIDを返す。"""
         ...
 
     async def get_status(self, job_id: str) -> JobStatus:
