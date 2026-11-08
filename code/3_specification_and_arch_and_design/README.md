@@ -1,7 +1,8 @@
 # 非同期ジョブ実行エンジン 仕様書 v1.0
 
-現在の実装は、以下のv1.0仕様に加えて [キャンセル追加仕様 v1.1](cancel.md) に対応する。
-キャンセルに関する記述と公開インターフェースの追加はv1.1仕様を優先する。
+現在の実装は、以下のv1.0仕様に加えて [キャンセル追加仕様 v1.1](cancel.md)、
+[最大同時実行数制限 v1.2](run_count.md)、[追加仕様 v2.0](v2.md) に対応する。
+仕様が重なる場合は新しいバージョンを優先する。現在の実装と使用例は末尾のv2.0節を参照。
 
 ## 1. 概要
 
@@ -204,7 +205,7 @@ Pythonで動作する非同期ジョブ実行エンジンを開発する。
 
 別途アーキテクチャや設計に関する資料が与えられた場合は、その資料の制約にも従うこと。
 
-## 9. v1.1の実装設計
+## 9. v1.1時点の実装設計（v2.0で更新）
 
 既存の `Engine → JobRunner → Job` の構成を維持する。
 
@@ -227,6 +228,54 @@ Pythonで動作する非同期ジョブ実行エンジンを開発する。
 
 上限に達しても `submit()` はジョブIDを返し、登録したジョブは `PENDING` で待機する。実行枠が空くと自動的に実行される。実行順序は保証しない。
 
-`Engine` ごとに独立した `asyncio.Semaphore` を保持し、そのエンジンの `JobRunner` 間で共有する。Runnerは枠を取得してからジョブを開始し、正常終了・異常終了・キャンセルによる実際の終了後に枠を解放する。キャンセルの終了処理やキャンセル抑制中も枠を保持する。待機中のジョブは本体を呼び出さずにキャンセルできる。
+v1.2時点では、`Engine` ごとに独立した `asyncio.Semaphore` をRunner間で共有していた。v2.0では以下のスケジューラで枠を管理する。キャンセルの終了処理やキャンセル抑制中も枠を保持し、待機中のジョブは本体を呼び出さずにキャンセルできる。
 
 `tests/test_run_count.py` で上限・待機中の操作・各終了結果での枠の解放・キャンセルとの競合・エンジン間の独立性を検証する。
+
+## 11. v2.0の利用方法と実装
+
+`submit_job(JobSpec(...))` でリトライ、バックオフ、試行ごとのタイムアウト、依存関係、優先度を指定できる。既存の `submit()` は追加設定なしのジョブを登録する。
+
+```python
+import asyncio
+
+from interface import JobSpec, RetryPolicy
+from main import create_engine
+
+
+async def main():
+    engine = create_engine(max_concurrency=2)
+
+    async def prepare(value):
+        return value * 2
+
+    async def finish():
+        return "finished"
+
+    first = await engine.submit_job(JobSpec(
+        prepare,
+        args=(21,),
+        retry=RetryPolicy(max_retries=2, initial_delay=0.1, max_delay=1.0),
+        timeout=5.0,
+        priority=10,
+    ))
+    second = await engine.submit_job(JobSpec(finish, depends_on=(first,)))
+    await engine.wait(second)
+    print(await engine.get_result(first))  # 42
+    print(await engine.get_result(second))  # finished
+
+
+asyncio.run(main())
+```
+
+- `Engine` は登録時に全設定と依存先を検証し、設定コンテナをコピーする。引数として渡したオブジェクトそのものは通常のPython関数呼び出しと同じ参照を渡す。
+- 実行可能ジョブを優先度と実行可能になった順序のヒープで管理する。依存関係待機中・バックオフ中はヒープに入れず、実行枠を使わない。完了・待機時間経過を契機に自動的にスケジューリングする。
+- `JobRunner` は一度の試行を実行し、失敗時にリトライ条件と待機時間を判定する。リトライ待機への遷移では完了を通知しない。
+- タイムアウトと明示キャンセルは、先に受け付けた要求だけを試行のTaskへ通知する。終了処理まで実行枠を保持し、実際の終了結果で状態を決める。タイムアウト通知後の実行中試行への `cancel()` は `False` を返す。
+- `Job` は状態・最終結果・完了通知を管理する。依存先の最終的な失敗・キャンセルは、直接依存先IDを持つ `JobDependencyError` として後続へ伝播する。
+
+`tests/test_v2.py` で追加機能、設定検証、登録の原子性、依存チェーン、中断要求の競合、既存機能との組み合わせを検証する。
+
+```sh
+uv run --python 3.14 python -m pytest -q
+```

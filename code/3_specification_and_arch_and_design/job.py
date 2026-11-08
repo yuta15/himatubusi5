@@ -2,22 +2,20 @@
 
 import asyncio
 from dataclasses import dataclass, field
-from typing import Awaitable, Callable
 
-from interface import JobCancelledError, JobExecutionError, JobNotFinishedError, JobStatus
-
-
-@dataclass(frozen=True)
-class JobSettings:
-    func: Callable[..., Awaitable[object]]
-    args: tuple[object, ...]
-    kwargs: dict[str, object]
+from interface import (
+    JobCancelledError,
+    JobExecutionError,
+    JobNotFinishedError,
+    JobSpec,
+    JobStatus,
+)
 
 
 @dataclass
 class Job:
     job_id: str
-    settings: JobSettings
+    settings: JobSpec
     _status: JobStatus = field(default=JobStatus.PENDING, init=False)
     result: object = field(default=None, init=False)
     cause: BaseException | None = field(default=None, init=False)
@@ -28,7 +26,7 @@ class Job:
         return self._status
 
     def start(self) -> bool:
-        """未実行のジョブだけを開始する。"""
+        """初回またはリトライ待機中のジョブを開始する。"""
         if self._status is not JobStatus.PENDING:
             return False
         self._status = JobStatus.RUNNING
@@ -42,11 +40,16 @@ class Job:
         self._completed.set()
 
     def fail(self, cause: BaseException) -> None:
-        if self._status is not JobStatus.RUNNING:
+        if self._status not in (JobStatus.PENDING, JobStatus.RUNNING):
             return
         self.cause = cause
         self._status = JobStatus.FAILED
         self._completed.set()
+
+    def retry(self) -> None:
+        """試行の失敗をジョブ全体の完了として通知しない。"""
+        if self._status is JobStatus.RUNNING:
+            self._status = JobStatus.PENDING
 
     def cancelled(self) -> None:
         """処理が未開始、またはCancelledErrorで終了した場合に確定する。"""

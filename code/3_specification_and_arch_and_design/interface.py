@@ -95,7 +95,8 @@ class JobEngine(Protocol):
 
         Returns:
             True: キャンセル要求を新たに受け付けた。
-            False: 既に要求済み、またはジョブが終端状態にある。
+            False: 既に要求済み、実行中の試行へタイムアウト通知済み、
+                   またはジョブが終端状態にある。
 
         Raises:
             JobNotFoundError: 指定されたジョブIDが存在しない。
