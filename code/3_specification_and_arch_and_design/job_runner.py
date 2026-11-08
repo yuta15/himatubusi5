@@ -7,7 +7,8 @@ from job import Job
 
 
 class JobRunner:
-    def __init__(self) -> None:
+    def __init__(self, execution_slots: asyncio.Semaphore | None = None) -> None:
+        self._execution_slots = execution_slots
         self._task: asyncio.Task[None] | None = None
         self._cancel_requested = False
 
@@ -29,6 +30,14 @@ class JobRunner:
         return True
 
     async def _run(self, job: Job) -> None:
+        if self._execution_slots is None:
+            await self._execute(job)
+        else:
+            # 枠の待機中はPENDINGのままにし、終了処理も含めて枠を保持する。
+            async with self._execution_slots:
+                await self._execute(job)
+
+    async def _execute(self, job: Job) -> None:
         if not job.start():
             return
         try:

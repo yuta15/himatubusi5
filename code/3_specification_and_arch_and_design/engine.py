@@ -1,5 +1,6 @@
 """単一プロセス内の非同期ジョブ実行エンジン。"""
 
+import asyncio
 from dataclasses import dataclass
 from typing import Awaitable, Callable
 from uuid import uuid4
@@ -16,7 +17,15 @@ class _Registration:
 
 
 class Engine:
-    def __init__(self) -> None:
+    def __init__(self, max_concurrency: int | None = None) -> None:
+        if max_concurrency is not None:
+            if isinstance(max_concurrency, bool) or not isinstance(max_concurrency, int):
+                raise TypeError("最大同時実行数には正の整数またはNoneを指定してください")
+            if max_concurrency <= 0:
+                raise ValueError("最大同時実行数には正の整数を指定してください")
+        self._execution_slots = (
+            asyncio.Semaphore(max_concurrency) if max_concurrency is not None else None
+        )
         self._jobs: dict[str, _Registration] = {}
 
     async def submit(
@@ -33,7 +42,7 @@ class Engine:
             job_id = uuid4().hex
         settings = JobSettings(func, args, kwargs)
         job = Job(job_id, settings)
-        runner = JobRunner()
+        runner = JobRunner(self._execution_slots)
         self._jobs[job_id] = _Registration(job, runner)
         runner.schedule(job)
         return job_id
