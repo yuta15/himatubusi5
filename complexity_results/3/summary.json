@@ -1,0 +1,18 @@
+{
+  "condition": "3",
+  "directory": "3_specification_and_arch_and_design",
+  "file_count": 5,
+  "source_lines": 491,
+  "cyclomatic_function_count": 39,
+  "cognitive_function_count": 39,
+  "cognitive_module_sum": 0,
+  "cognitive_file_total": 100,
+  "cyclomatic_sum": 125,
+  "cyclomatic_mean": 3.2051,
+  "cyclomatic_max": 24,
+  "cyclomatic_p90": 7,
+  "cognitive_sum": 100,
+  "cognitive_mean": 2.5641,
+  "cognitive_max": 17,
+  "cognitive_p90": 8
+}

@@ -1,0 +1,18 @@
+{
+  "condition": "1",
+  "directory": "1_only_specification",
+  "file_count": 3,
+  "source_lines": 415,
+  "cyclomatic_function_count": 27,
+  "cognitive_function_count": 27,
+  "cognitive_module_sum": 0,
+  "cognitive_file_total": 89,
+  "cyclomatic_sum": 104,
+  "cyclomatic_mean": 3.8519,
+  "cyclomatic_max": 22,
+  "cyclomatic_p90": 7,
+  "cognitive_sum": 89,
+  "cognitive_mean": 3.2963,
+  "cognitive_max": 18,
+  "cognitive_p90": 8
+}

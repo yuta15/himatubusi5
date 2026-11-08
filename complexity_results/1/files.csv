@@ -1,0 +1,4 @@
+condition,file,source_lines,cyclomatic_function_count,cyclomatic_sum,cyclomatic_max,cyclomatic_module,cognitive_function_count,cognitive_sum,cognitive_max,cognitive_module,cognitive_file_total,sha256
+1,engine.py,299,18,95,22,1,18,89,18,0,89,d688b5716274b73d5244bb7ee91dd7e74adf4c1acb467c771387919b12deea0e
+1,interface.py,103,8,8,1,1,8,0,0,0,0,b798f1b73e720f33aa0708d8c9cc69b9bab41b2594d86a0493234893af23b8ef
+1,main.py,13,1,1,1,1,1,0,0,0,0,f003c921ecadca115699887d1bbe418a6d43463ef3163f1cda3a98a3ba21fead
